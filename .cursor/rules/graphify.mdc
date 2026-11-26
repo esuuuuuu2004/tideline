@@ -1,0 +1,18 @@
+---
+description: Graphify codebase navigation
+alwaysApply: true
+---
+
+This project uses Graphify for codebase navigation. Its local graph is stored in graphify-out/.
+
+Before broad codebase exploration or multi-file changes:
+- `graphify query "<specific question>" --budget 500` — understand relevant architecture.
+- `graphify explain "<symbol or file>"` — inspect relationships.
+- `graphify path "<A>" "<B>"` — trace dependencies.
+- `graphify affected "<symbol or file>"` — identify potentially impacted code.
+
+Use targeted Read, Grep, Glob, and terminal commands after graph orientation. Always verify actual source files before editing.
+
+After meaningful structural code changes, run `graphify update .`.
+
+Never use paid AI extraction unless explicitly authorized.

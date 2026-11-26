@@ -51,3 +51,7 @@ example
 
 # Local Impeccable configuration
 .impeccable/config.local.json
+# Generated Graphify and Obsidian data
+/graphify-out/
+/tideline-knowledge/
+/app.json.backup

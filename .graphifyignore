@@ -1,0 +1,13 @@
+# Third-party agent tooling
+.claude/
+.cursor/
+
+# Generated Graphify output
+graphify-out/
+
+# Obsidian export
+tideline-knowledge/
+
+# Dependencies and generated files
+node_modules/
+.expo/

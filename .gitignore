@@ -41,3 +41,13 @@ example
 # generated native folders
 /ios
 /android
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Local Impeccable configuration
+.impeccable/config.local.json

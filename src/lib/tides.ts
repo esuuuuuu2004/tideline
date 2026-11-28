@@ -1,9 +1,7 @@
 /**
- * Astronomical harmonic tide prediction engine for Taluksangay, Zamboanga City.
- *
- * Models mixed, predominantly semidiurnal tides (Formzahl F ≈ 0.49) typical of
- * the Moro Gulf / Basilan Strait coast using standard astronomical speeds and
- * J2000-anchored equilibrium arguments (M2, S2, N2, K1, O1, P1, M4).
+ * Provisional astronomical harmonic prediction for Taluksangay, Zamboanga City.
+ * Constituent amplitudes/phases and the datum offset are undocumented and
+ * unvalidated; values returned here are predictions, not gauge observations.
  *
  * All day boundaries and formatted timestamps are locked to Philippine Standard
  * Time (Asia/Manila, UTC+8) regardless of the device's local timezone.
@@ -19,13 +17,13 @@ export const STATION = {
   longitude: 122.1714,
   coordsLabel: '6.9428° N, 122.1714° E',
   timezone: 'UTC+8 (PHT)',
-  datum: 'MLLW',
-  meanSeaLevelMeters: 0.78,
+  datum: 'MLLW (unverified)',
+  provisionalDatumOffsetMeters: 0.78,
 } as const;
 
 export type TideUnit = 'm' | 'ft';
 export type TimeFormat = '12h' | '24h';
-export type TideDirection = 'Rising' | 'Falling' | 'Slack';
+export type TideLevelTrend = 'Rising' | 'Falling' | 'Near turn';
 export type TideExtremumKind = 'high' | 'low';
 export type TideRegime = 'Spring tide' | 'Neap tide' | 'Moderate range';
 
@@ -34,7 +32,7 @@ export interface TideSample {
   minuteOfDay: number;
   /** Epoch ms */
   timestampMs: number;
-  /** Height in meters above MLLW */
+  /** Predicted height in meters relative to the unverified MLLW target */
   heightMeters: number;
 }
 
@@ -73,16 +71,16 @@ export interface DayForecast {
   solar: SolarWindow;
 }
 
-export interface CurrentTideSnapshot {
+export interface TidePredictionSnapshot {
   timestampMs: number;
   heightMeters: number;
   rateMetersPerHour: number;
-  direction: TideDirection;
+  levelTrend: TideLevelTrend;
   nextExtremum: TideExtremum;
   nextHigh: TideExtremum;
   nextLow: TideExtremum;
   previousExtremum: TideExtremum;
-  coastalNote: string;
+  predictionNote: string;
 }
 
 const PHT_OFFSET_MS = 8 * 3600 * 1000;
@@ -97,18 +95,19 @@ interface Constituent {
   name: string;
   /** Amplitude in meters */
   amplitude: number;
-  /** Angular speed in deg/hour */
+  /** Reference angular speed in deg/hour; the Doodson coefficients synthesize V */
   speedDegPerHr: number;
-  /** Local Greenwich phase lag (G) in degrees for Zamboanga / Basilan Strait */
+  /** Assumed Greenwich phase lag G in degrees; the station values are unverified */
   phaseLagDeg: number;
   /** Linear coefficients on (tau, s, h, p, shift) for Doodson equilibrium V0 */
   coeff: readonly [number, number, number, number, number];
 }
 
 /**
- * Calibrated harmonic constituents for Zamboanga / Taluksangay coastal shelf.
- * Formzahl F = (K1 + O1) / (M2 + S2) = (0.15 + 0.11) / (0.37 + 0.16) ≈ 0.49
- * (mixed, predominantly semidiurnal).
+ * Provisional, unvalidated constants retained from the previous implementation.
+ * Their amplitudes/phases have no documented station or model provenance.
+ * Phase is assumed Greenwich phase lag G in h = H0 + Σ fH cos(V + u - G).
+ * The listed speeds are standard values; V is computed from the arguments below.
  */
 const CONSTITUENTS: readonly Constituent[] = [
   { name: 'M2', amplitude: 0.37, speedDegPerHr: 28.9841042, phaseLagDeg: 204, coeff: [2, 0, 0, 0, 0] },
@@ -137,8 +136,16 @@ function astronomicalArgs(ms: number) {
   const s = normDeg(218.3164477 + 481267.88123421 * T);
   const h = normDeg(280.46646 + 36000.76983 * T);
   const p = normDeg(83.3532465 + 4069.0137287 * T);
+  // Mean longitude of the Moon's ascending node (Meeus polynomial, J2000).
+  const N = normDeg(
+    125.04455501 -
+      1934.1361849 * T +
+      0.0020762 * T * T +
+      (T * T * T) / 467410 -
+      (T * T * T * T) / 60616000,
+  );
 
-  // Greenwich hour angle of mean sun in degrees at this UTC instant
+  // Greenwich mean lunar time angle τ = UT solar angle + h - s.
   const utcDate = new Date(ms);
   const utHours =
     utcDate.getUTCHours() +
@@ -147,33 +154,126 @@ function astronomicalArgs(ms: number) {
     utcDate.getUTCMilliseconds() / 3600000;
   const tau = normDeg(utHours * 15 - 180 + h - s);
 
-  return { tau, s, h, p, daysSinceJ2000 };
+  const centuriesPerHour = 1 / (36525 * 24);
+  const sRateDegPerHour = 481267.88123421 * centuriesPerHour;
+  const hRateDegPerHour = 36000.76983 * centuriesPerHour;
+  const pRateDegPerHour = 4069.0137287 * centuriesPerHour;
+  const nodeRateDegPerHour =
+    (-1934.1361849 +
+      2 * 0.0020762 * T +
+      (3 * T * T) / 467410 -
+      (4 * T * T * T) / 60616000) *
+    centuriesPerHour;
+
+  return {
+    tau,
+    s,
+    h,
+    p,
+    N,
+    tauRateDegPerHour: 15 + hRateDegPerHour - sRateDegPerHour,
+    sRateDegPerHour,
+    hRateDegPerHour,
+    pRateDegPerHour,
+    nodeRateDegPerHour,
+  };
+}
+
+interface NodalCorrection {
+  factor: number;
+  phaseDeg: number;
+  /** Derivatives with respect to node angle in radians. */
+  factorDerivativePerRad: number;
+  phaseDerivativeDegPerRad: number;
+}
+
+/** Short-series nodal corrections (Schureman/Pugh convention). */
+function nodalCorrection(name: string, nodeDeg: number): NodalCorrection {
+  const N = nodeDeg * DEG_TO_RAD;
+  const sinN = Math.sin(N);
+  const cosN = Math.cos(N);
+  const sin2N = Math.sin(2 * N);
+  const cos2N = Math.cos(2 * N);
+  const sin3N = Math.sin(3 * N);
+  const cos3N = Math.cos(3 * N);
+
+  if (name === 'M2' || name === 'N2') {
+    return {
+      factor: 1.0007 - 0.0373 * cosN + 0.0002 * cos2N,
+      phaseDeg: -2.14 * sinN,
+      factorDerivativePerRad: 0.0373 * sinN - 0.0004 * sin2N,
+      phaseDerivativeDegPerRad: -2.14 * cosN,
+    };
+  }
+  if (name === 'O1') {
+    return {
+      factor: 1.009 + 0.187 * cosN - 0.015 * cos2N + 0.001 * cos3N,
+      phaseDeg: 10.8 * sinN - 1.3 * sin2N + 0.2 * sin3N,
+      factorDerivativePerRad: -0.187 * sinN + 0.03 * sin2N - 0.003 * sin3N,
+      phaseDerivativeDegPerRad: 10.8 * cosN - 2.6 * cos2N + 0.6 * cos3N,
+    };
+  }
+  if (name === 'K1') {
+    return {
+      factor: 1.006 + 0.115 * cosN - 0.0088 * cos2N + 0.0006 * cos3N,
+      phaseDeg: -8.9 * sinN + 0.7 * sin2N - 0.1 * sin3N,
+      factorDerivativePerRad: -0.115 * sinN + 0.0176 * sin2N - 0.0018 * sin3N,
+      phaseDerivativeDegPerRad: -8.9 * cosN + 1.4 * cos2N - 0.3 * cos3N,
+    };
+  }
+  if (name === 'M4') {
+    const m2 = nodalCorrection('M2', nodeDeg);
+    return {
+      factor: m2.factor * m2.factor,
+      phaseDeg: 2 * m2.phaseDeg,
+      factorDerivativePerRad: 2 * m2.factor * m2.factorDerivativePerRad,
+      phaseDerivativeDegPerRad: 2 * m2.phaseDerivativeDegPerRad,
+    };
+  }
+  // Solar S2 and P1 have no nodal correction in this convention.
+  return { factor: 1, phaseDeg: 0, factorDerivativePerRad: 0, phaseDerivativeDegPerRad: 0 };
 }
 
 /**
- * Predicts tide height in meters above MLLW at `timestampMs`.
+ * Returns a model-predicted height relative to the provisional datum offset.
+ * The intended MLLW realization and the 0.78 m offset are unverified.
  */
-export function predictTideMeters(timestampMs: number): number {
-  const { tau, s, h, p } = astronomicalArgs(timestampMs);
-  let height = STATION.meanSeaLevelMeters;
+function synthesizeTide(timestampMs: number): { heightMeters: number; rateMetersPerHour: number } {
+  const args = astronomicalArgs(timestampMs);
+  const { tau, s, h, p, N } = args;
+  let height = STATION.provisionalDatumOffsetMeters;
+  let rate = 0;
 
   for (const c of CONSTITUENTS) {
     const [cTau, cS, cH, cP, shift] = c.coeff;
-    const argDeg = cTau * tau + cS * s + cH * h + cP * p + shift - c.phaseLagDeg;
-    height += c.amplitude * Math.cos(argDeg * DEG_TO_RAD);
+    const correction = nodalCorrection(c.name, N);
+    const { factor, phaseDeg } = correction;
+    const equilibriumArgDeg = cTau * tau + cS * s + cH * h + cP * p + shift;
+    const argDeg = equilibriumArgDeg + phaseDeg - c.phaseLagDeg;
+    const angleRad = argDeg * DEG_TO_RAD;
+    const argumentRateDegPerHour =
+      cTau * args.tauRateDegPerHour +
+      cS * args.sRateDegPerHour +
+      cH * args.hRateDegPerHour +
+      cP * args.pRateDegPerHour +
+      correction.phaseDerivativeDegPerRad * args.nodeRateDegPerHour * DEG_TO_RAD;
+    const factorRatePerHour = correction.factorDerivativePerRad * args.nodeRateDegPerHour * DEG_TO_RAD;
+    height += factor * c.amplitude * Math.cos(angleRad);
+    rate += c.amplitude * (factorRatePerHour * Math.cos(angleRad) - factor * Math.sin(angleRad) * argumentRateDegPerHour * DEG_TO_RAD);
   }
 
-  return height;
+  return { heightMeters: height, rateMetersPerHour: rate };
+}
+
+export function predictTideMeters(timestampMs: number): number {
+  return synthesizeTide(timestampMs).heightMeters;
 }
 
 /**
- * Rate of water change in meters/hour using central finite difference (+/- 5 min).
+ * Analytic derivative of the same harmonic synthesis, in predicted meters/hour.
  */
 export function predictTideRateMetersPerHour(timestampMs: number): number {
-  const dtMs = 5 * 60 * 1000;
-  const hBefore = predictTideMeters(timestampMs - dtMs);
-  const hAfter = predictTideMeters(timestampMs + dtMs);
-  return (hAfter - hBefore) / (2 * (5 / 60));
+  return synthesizeTide(timestampMs).rateMetersPerHour;
 }
 
 export function getPhtDateParts(timestampMs: number) {
@@ -199,46 +299,47 @@ export function toPhtDateKey(timestampMs: number): string {
 }
 
 /**
- * Finds local extrema (High and Low tides) inside `[startMs, endMs)`.
+ * Finds local extrema of the predicted curve inside `[startMs, endMs)`.
  */
 function findExtremaInRange(startMs: number, endMs: number, dayStartMs: number): TideExtremum[] {
-  const stepMs = 5 * 60 * 1000;
+  const stepMs = 60 * 1000;
   const extrema: TideExtremum[] = [];
+  let leftMs = startMs - stepMs;
+  let leftRate = predictTideRateMetersPerHour(leftMs);
 
-  let prevH = predictTideMeters(startMs - stepMs);
-  let currH = predictTideMeters(startMs);
+  while (leftMs < endMs) {
+    const rightMs = Math.min(leftMs + stepMs, endMs);
+    const rightRate = predictTideRateMetersPerHour(rightMs);
+    const isHigh = leftRate > 0 && rightRate <= 0;
+    const isLow = leftRate < 0 && rightRate >= 0;
 
-  for (let t = startMs; t < endMs; t += stepMs) {
-    const nextH = predictTideMeters(t + stepMs);
-    const isMax = currH > prevH && currH >= nextH;
-    const isMin = currH < prevH && currH <= nextH;
-
-    if (isMax || isMin) {
-      // Parabolic refinement within [t - stepMs, t + stepMs]
-      const denom = 2 * (prevH - 2 * currH + nextH);
-      let refinedOffset = 0;
-      if (Math.abs(denom) > 1e-9) {
-        refinedOffset = ((prevH - nextH) * stepMs) / denom;
-        refinedOffset = Math.max(-stepMs, Math.min(stepMs, refinedOffset));
-      }
-      const peakMs = Math.round(t + refinedOffset);
-      if (peakMs >= startMs && peakMs < endMs) {
-        const kind: TideExtremumKind = isMax ? 'high' : 'low';
-        const prev = extrema[extrema.length - 1];
-        // Ignore micro-ripples within 60 minutes of a previous extremum
-        if (!prev || peakMs - prev.timestampMs >= 60 * 60 * 1000) {
-          extrema.push({
-            kind,
-            timestampMs: peakMs,
-            minuteOfDay: (peakMs - dayStartMs) / 60000,
-            heightMeters: predictTideMeters(peakMs),
-          });
+    if (isHigh || isLow) {
+      let lo = leftMs;
+      let hi = rightMs;
+      // Refine the derivative zero to a one-millisecond interval.
+      while (hi - lo > 1) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        const midRate = predictTideRateMetersPerHour(mid);
+        if ((isHigh && midRate > 0) || (isLow && midRate < 0)) {
+          lo = mid;
+        } else {
+          hi = mid;
         }
+      }
+      // Use the midpoint of the final bracket; the resulting timestamp is within 1 ms.
+      const extremumMs = lo + Math.floor((hi - lo) / 2);
+      if (extremumMs >= startMs && extremumMs < endMs) {
+        extrema.push({
+          kind: isHigh ? 'high' : 'low',
+          timestampMs: extremumMs,
+          minuteOfDay: (extremumMs - dayStartMs) / 60000,
+          heightMeters: predictTideMeters(extremumMs),
+        });
       }
     }
 
-    prevH = currH;
-    currH = nextH;
+    leftMs = rightMs;
+    leftRate = rightRate;
   }
 
   return extrema;
@@ -366,32 +467,18 @@ export function buildMultiDayForecast(anchorMs: number, days = 7): DayForecast[]
   return result;
 }
 
-function buildCoastalNote(
-  heightMeters: number,
-  direction: TideDirection,
-): string {
-  if (heightMeters >= 1.15) {
-    return 'High water over the Taluksangay stilt flats — deep access along boat channels and seaweed lines.';
-  }
-  if (heightMeters <= 0.35) {
-    return 'Low water exposes reef shelves and shallow sandbars; watch hull draft near the stilt boardwalk.';
-  }
-  if (direction === 'Rising') {
-    return 'Incoming flood current across Basilan Strait — water is filling the nearshore reef flat.';
-  }
-  if (direction === 'Falling') {
-    return 'Ebbing tide drawing water off the shelf toward Moro Gulf — steady outflow along channels.';
-  }
-  return 'Slack water turning at Taluksangay — minimal tidal current for nearshore mooring.';
+function buildPredictionNote(levelTrend: TideLevelTrend): string {
+  const state = levelTrend === 'Near turn' ? 'near a turning point' : levelTrend.toLowerCase();
+  return `Unvalidated harmonic prediction: water level is ${state}. This is not an observation or a current measurement.`;
 }
 
-export function getCurrentTideSnapshot(nowMs: number): CurrentTideSnapshot {
-  const heightMeters = predictTideMeters(nowMs);
-  const rateMetersPerHour = predictTideRateMetersPerHour(nowMs);
+export function getTidePredictionSnapshot(nowMs: number): TidePredictionSnapshot {
+  const prediction = synthesizeTide(nowMs);
+  const { heightMeters, rateMetersPerHour } = prediction;
 
-  let direction: TideDirection = 'Slack';
-  if (rateMetersPerHour > 0.03) direction = 'Rising';
-  else if (rateMetersPerHour < -0.03) direction = 'Falling';
+  let levelTrend: TideLevelTrend = 'Near turn';
+  if (rateMetersPerHour > 0.03) levelTrend = 'Rising';
+  else if (rateMetersPerHour < -0.03) levelTrend = 'Falling';
 
   const todayStart = phtMidnightMs(nowMs);
   const windowExtrema = [
@@ -412,12 +499,12 @@ export function getCurrentTideSnapshot(nowMs: number): CurrentTideSnapshot {
     timestampMs: nowMs,
     heightMeters,
     rateMetersPerHour,
-    direction,
+    levelTrend,
     nextExtremum,
     nextHigh,
     nextLow,
     previousExtremum,
-    coastalNote: buildCoastalNote(heightMeters, direction),
+    predictionNote: buildPredictionNote(levelTrend),
   };
 }
 

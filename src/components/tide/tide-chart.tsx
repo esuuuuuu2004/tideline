@@ -38,6 +38,7 @@ import { Spacing } from '@/constants/theme';
 import {
   STATION,
   formatHeight,
+  formatHeightNumber,
   formatPhtTime,
   type DayForecast,
   type TideUnit,
@@ -51,6 +52,8 @@ interface TideChartProps {
   timeFormat: TimeFormat;
   /** Current PHT minute of day (0..1440) when viewing Today; null otherwise. */
   nowMinute: number | null;
+  /** Exact predicted height for the current-time marker when available. */
+  nowHeightMeters?: number | null;
   /** Controlled scrubbed sample index (0..96) or null when live/unscrubbed. */
   scrubIndex: number | null;
   onScrubIndexChange: (index: number | null) => void;
@@ -58,7 +61,8 @@ interface TideChartProps {
   height?: number;
 }
 
-const CHART_PAD_X = 10;
+const CHART_PAD_LEFT = 42;
+const CHART_PAD_RIGHT = 10;
 const CHART_PAD_TOP = 26;
 const CHART_PAD_BOTTOM = 28;
 
@@ -99,6 +103,7 @@ export function TideChart({
   unit,
   timeFormat,
   nowMinute,
+  nowHeightMeters = null,
   scrubIndex,
   onScrubIndexChange,
   height = 210,
@@ -107,7 +112,7 @@ export function TideChart({
   const reduced = useReducedMotion();
   const [width, setWidth] = useState(0);
 
-  const plotWidth = Math.max(1, width - CHART_PAD_X * 2);
+  const plotWidth = Math.max(1, width - CHART_PAD_LEFT - CHART_PAD_RIGHT);
   const plotHeight = Math.max(1, height - CHART_PAD_TOP - CHART_PAD_BOTTOM);
   const baselineY = CHART_PAD_TOP + plotHeight;
 
@@ -125,7 +130,7 @@ export function TideChart({
   const points = useMemo(
     () =>
       forecast.samples.map((s) => ({
-        x: CHART_PAD_X + (s.minuteOfDay / 1440) * plotWidth,
+        x: CHART_PAD_LEFT + (s.minuteOfDay / 1440) * plotWidth,
         y: toY(s.heightMeters),
       })),
     [forecast.samples, plotWidth, toY],
@@ -138,14 +143,20 @@ export function TideChart({
     [points, baselineY],
   );
 
-  const mslY = toY(STATION.meanSeaLevelMeters);
   const datumY = toY(0);
+  const heightTicks = useMemo(
+    () => Array.from({ length: 5 }, (_, index) => {
+      const value = yMax - (index / 4) * ySpan;
+      return { value, y: toY(value) };
+    }),
+    [yMax, ySpan, toY],
+  );
 
   const extremaMarkers = useMemo(
     () =>
       forecast.extrema.map((ex) => ({
         ...ex,
-        x: CHART_PAD_X + (ex.minuteOfDay / 1440) * plotWidth,
+        x: CHART_PAD_LEFT + (ex.minuteOfDay / 1440) * plotWidth,
         y: toY(ex.heightMeters),
         step: Math.round(ex.minuteOfDay / 15),
       })),
@@ -164,16 +175,18 @@ export function TideChart({
     const i0 = Math.floor(idxFloat);
     const i1 = Math.min(points.length - 1, i0 + 1);
     const frac = idxFloat - i0;
-    const y = points[i0].y + (points[i1].y - points[i0].y) * frac;
+    const y = nowHeightMeters === null
+      ? points[i0].y + (points[i1].y - points[i0].y) * frac
+      : toY(nowHeightMeters);
     return {
-      x: CHART_PAD_X + (clamped / 1440) * plotWidth,
+      x: CHART_PAD_LEFT + (clamped / 1440) * plotWidth,
       y,
     };
-  }, [nowMinute, width, points, plotWidth]);
+  }, [nowMinute, nowHeightMeters, width, points, plotWidth, toY]);
 
   // Shared values for UI-thread scrubbing
   const isScrubbing = useSharedValue(0);
-  const scrubX = useSharedValue(CHART_PAD_X);
+  const scrubX = useSharedValue(CHART_PAD_LEFT);
   const scrubY = useSharedValue(CHART_PAD_TOP + plotHeight * 0.5);
   const lastStep = useSharedValue(-1);
   const lastExtremumStep = useSharedValue(-1);
@@ -203,7 +216,7 @@ export function TideChart({
       return;
     }
     const clampedIdx = Math.max(0, Math.min(yCoords.length - 1, scrubIndex));
-    const targetX = CHART_PAD_X + (clampedIdx / (yCoords.length - 1)) * plotWidth;
+    const targetX = CHART_PAD_LEFT + (clampedIdx / (yCoords.length - 1)) * plotWidth;
     const targetY = yCoords[clampedIdx];
     isScrubbing.set(1);
     if (reduced) {
@@ -222,8 +235,8 @@ export function TideChart({
       'worklet';
       if (plotWidth <= 1 || yCoords.length === 0) return;
       isScrubbing.set(1);
-      const clampedX = Math.max(CHART_PAD_X, Math.min(CHART_PAD_X + plotWidth, e.x));
-      const ratio = (clampedX - CHART_PAD_X) / plotWidth;
+      const clampedX = Math.max(CHART_PAD_LEFT, Math.min(CHART_PAD_LEFT + plotWidth, e.x));
+      const ratio = (clampedX - CHART_PAD_LEFT) / plotWidth;
       const idxFloat = ratio * (yCoords.length - 1);
       const i0 = Math.floor(idxFloat);
       const i1 = Math.min(yCoords.length - 1, i0 + 1);
@@ -237,8 +250,8 @@ export function TideChart({
     onUpdate: (e) => {
       'worklet';
       if (plotWidth <= 1 || yCoords.length === 0) return;
-      const clampedX = Math.max(CHART_PAD_X, Math.min(CHART_PAD_X + plotWidth, e.x));
-      const ratio = (clampedX - CHART_PAD_X) / plotWidth;
+      const clampedX = Math.max(CHART_PAD_LEFT, Math.min(CHART_PAD_LEFT + plotWidth, e.x));
+      const ratio = (clampedX - CHART_PAD_LEFT) / plotWidth;
       const idxFloat = ratio * (yCoords.length - 1);
       const i0 = Math.floor(idxFloat);
       const i1 = Math.min(yCoords.length - 1, i0 + 1);
@@ -274,10 +287,10 @@ export function TideChart({
       'worklet';
       if (e.canceled || plotWidth <= 1 || yCoords.length === 0) return;
       isScrubbing.set(1);
-      const clampedX = Math.max(CHART_PAD_X, Math.min(CHART_PAD_X + plotWidth, e.x));
-      const ratio = (clampedX - CHART_PAD_X) / plotWidth;
+      const clampedX = Math.max(CHART_PAD_LEFT, Math.min(CHART_PAD_LEFT + plotWidth, e.x));
+      const ratio = (clampedX - CHART_PAD_LEFT) / plotWidth;
       const step = Math.round(ratio * (yCoords.length - 1));
-      const targetX = CHART_PAD_X + (step / (yCoords.length - 1)) * plotWidth;
+      const targetX = CHART_PAD_LEFT + (step / (yCoords.length - 1)) * plotWidth;
       const targetY = yCoords[step];
       scrubX.set(reduced ? targetX : withSpring(targetX, { duration: 200, dampingRatio: 1 }));
       scrubY.set(reduced ? targetY : withSpring(targetY, { duration: 200, dampingRatio: 1 }));
@@ -320,7 +333,7 @@ export function TideChart({
               : h < 12
                 ? `${h}a`
                 : `${h - 12}p`;
-      const x = CHART_PAD_X + (h / 24) * plotWidth;
+      const x = CHART_PAD_LEFT + (h / 24) * plotWidth;
       return { h, label, x };
     });
   }, [timeFormat, plotWidth]);
@@ -340,28 +353,40 @@ export function TideChart({
                 </LinearGradient>
               </Defs>
 
-              {/* Mean Sea Level hairline */}
-              <Line
-                x1={CHART_PAD_X}
-                y1={mslY}
-                x2={CHART_PAD_X + plotWidth}
-                y2={mslY}
-                stroke={colors.border}
-                strokeWidth={1}
-                strokeDasharray="4 4"
-              />
-
-              {/* MLLW 0.0 datum line */}
+              {/* Zero line marks the intended, unverified MLLW target. */}
               {datumY <= baselineY && datumY >= CHART_PAD_TOP && (
                 <Line
-                  x1={CHART_PAD_X}
+                  x1={CHART_PAD_LEFT}
                   y1={datumY}
-                  x2={CHART_PAD_X + plotWidth}
+                  x2={CHART_PAD_LEFT + plotWidth}
                   y2={datumY}
                   stroke={colors.border}
                   strokeWidth={1}
                 />
               )}
+
+              {heightTicks.map((tick, index) => (
+                <G key={`height-${index}`}>
+                  <Line
+                    x1={CHART_PAD_LEFT}
+                    y1={tick.y}
+                    x2={CHART_PAD_LEFT + plotWidth}
+                    y2={tick.y}
+                    stroke={colors.border}
+                    strokeWidth={1}
+                    strokeOpacity={0.55}
+                  />
+                  <SvgText
+                    x={CHART_PAD_LEFT - 6}
+                    y={tick.y + 3.5}
+                    fill={colors.textSecondary}
+                    fontSize={9.5}
+                    fontFamily={svgFontFamily}
+                    textAnchor="end">
+                    {`${formatHeightNumber(tick.value, unit)} ${unit}`}
+                  </SvgText>
+                </G>
+              ))}
 
               {/* Water body fill + harmonic curve */}
               <Path d={areaPath} fill="url(#tideFill)" />
@@ -379,7 +404,7 @@ export function TideChart({
                 const labelY = isHigh
                   ? Math.max(12, m.y - 10)
                   : Math.min(baselineY + 11, m.y + 16);
-                const clampedX = Math.max(CHART_PAD_X + 24, Math.min(width - CHART_PAD_X - 24, m.x));
+                const clampedX = Math.max(CHART_PAD_LEFT + 24, Math.min(width - CHART_PAD_RIGHT - 24, m.x));
                 return (
                   <G key={m.timestampMs}>
                     <Circle
@@ -483,7 +508,7 @@ export function TideChart({
 
       <View style={styles.legendRow}>
         <TideText token="caption" color="textSecondary">
-          Drag or tap curve to inspect · {STATION.datum} datum
+          Predicted curve · target datum {STATION.datum}
         </TideText>
         {scrubIndex !== null && (
           <TideText token="caption" role="data" color="accent">

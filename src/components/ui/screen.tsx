@@ -15,6 +15,8 @@ interface ScreenProps {
   title?: string;
   subtitle?: string;
   headerRight?: ReactNode;
+  background?: ReactNode;
+  transparentBackground?: boolean;
   children: ReactNode;
   /** Wrap content in a ScrollView. Default true. */
   scroll?: boolean;
@@ -24,6 +26,8 @@ export function Screen({
   title,
   subtitle,
   headerRight,
+  background,
+  transparentBackground = false,
   children,
   scroll = true,
 }: ScreenProps) {
@@ -58,7 +62,8 @@ export function Screen({
   );
 
   return (
-    <View style={[styles.screen, { backgroundColor: colors.background }]}>
+    <View style={[styles.screen, { backgroundColor: transparentBackground ? 'transparent' : colors.background }]}>
+      {background ? <View pointerEvents="none" style={styles.background}>{background}</View> : null}
       {scroll ? (
         <ScrollView
           contentContainerStyle={contentStyle}
@@ -76,6 +81,9 @@ export function Screen({
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
+  },
+  background: {
+    ...StyleSheet.absoluteFill,
   },
   fill: {
     flex: 1,
